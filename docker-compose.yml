@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  vote:
+    build: ./vote
+    container_name: vote_service
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python app.py
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "5000:80"
+    environment:
+      - REDIS_HOST=redis
+    env_file:
+      - .env
+
+  result:
+    build: ./result
+    container_name: result_service
+    depends_on:
+      db:
+        condition: service_healthy
+    command: node server.js
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "5001:80"
+    environment:
+      - DB_HOST=db
+    env_file:
+      - .env
+
+  worker:
+    build: ./worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    environment:
+      - REDIS_HOST=redis
+      - DB_HOST=db
+    env_file:
+      - .env
+
+  redis:
+    image: redis:8-alpine
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: postgres:17-alpine
+    container_name: votes_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    restart: always
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-vote:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d votes"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend
+    env_file:
+      - .env
+    
+
+volumes:
+  db-vote:
+
+networks:
+  frontend:
+  backend:

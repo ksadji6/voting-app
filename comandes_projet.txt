@@ -1,0 +1,256 @@
+Absolument \! Voici un plan d'action détaillé pour réaliser votre projet de fin de module. J'ai analysé les spécifications (`Projet_Devops_specs.pdf`), la structure de votre projet `voting-app`, et le `docker-compose.yml` que vous avez fourni.
+
+Votre `docker-compose.yml` actuel est un excellent point de départ. Il respecte déjà plusieurs bonnes pratiques comme l'utilisation de `depends_on` avec `healthcheck` et la segmentation des réseaux. Nous allons l'adapter pour qu'il corresponde parfaitement à toutes les exigences du projet, notamment la gestion des variables d'environnement, puis nous mettrons en place le pipeline Jenkins.
+
+-----
+
+### Étape 1 : Mise en conformité de Docker Compose (Tâches 1 à 4)
+
+L'objectif ici est de finaliser votre environnement Docker Compose en externalisant les variables de configuration, comme demandé dans les spécifications.
+
+#### **Action 1 : Créer un fichier `.env`**
+
+[cite\_start]Pour respecter la consigne de ne pas "commiter" de variables sensibles [cite: 51] [cite\_start]et de les centraliser[cite: 50], nous allons créer un fichier `.env` à la racine de votre projet `voting-app/`.
+
+1.  Créez un fichier nommé `.env` dans le dossier `voting-app/`.
+
+2.  Ajoutez-y le contenu suivant. Il s'agit des variables d'environnement de vos services `db` et `worker`.
+
+    ```env
+    # Fichier .env pour la configuration de l'application
+
+    # Configuration PostgreSQL
+    POSTGRES_USER=user
+    POSTGRES_PASSWORD=passer
+    POSTGRES_DB=votes
+
+    # Configuration des services
+    REDIS_HOST=redis
+    DB_HOST=db
+    ```
+
+#### **Action 2 : Mettre à jour le fichier `docker-compose.yml`**
+
+Maintenant, modifions votre `docker-compose.yml` pour qu'il utilise ce nouveau fichier `.env` et pour s'assurer que les chemins de build sont optimaux.
+
+1.  Ouvrez votre fichier `docker-compose.yml`.
+
+2.  Remplacez son contenu par la version ci-dessous.
+
+    **Changements effectués :**
+
+      * Suppression des blocs `environment` dans les services `vote`, `result`, `worker` et `db`.
+      * Ajout de la directive `env_file: ./.env` dans les services qui en ont besoin pour charger la configuration depuis votre nouveau fichier.
+      * Simplification des contextes de `build` (ex: `./vote` au lieu de `./vote/Dockerfile`).
+
+    <!-- end list -->
+
+    ```yaml
+    version: '3.8'
+
+    services:
+      vote:
+        build: ./vote
+        container_name: vote_service
+        ports:
+          - "5000:80"
+        networks:
+          - frontend
+          - backend
+        depends_on:
+          redis:
+            condition: service_healthy
+        env_file:
+          - ./.env
+
+      result:
+        build: ./result
+        container_name: result_service
+        ports:
+          - "5001:80"
+        networks:
+          - frontend
+          - backend
+        depends_on:
+          db:
+            condition: service_healthy
+        env_file:
+          - ./.env
+
+      worker:
+        build: ./worker
+        container_name: worker_service
+        networks:
+          - backend
+        depends_on:
+          - redis
+          - db
+        env_file:
+          - ./.env
+
+      redis:
+        image: redis:latest
+        container_name: redis_cache
+        networks:
+          - backend
+        healthcheck:
+          test: ["CMD", "redis-cli", "ping"]
+          interval: 5s
+          timeout: 3s
+          retries: 5
+
+      db:
+        image: postgres:15-alpine
+        container_name: votes_db
+        ports:
+          - "5432:5432"
+        networks:
+          - backend
+        volumes:
+          - db-vote:/var/lib/postgresql/data
+        env_file:
+          - ./.env
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+          interval: 5s
+          timeout: 5s
+          retries: 5
+          start_period: 10s
+
+    volumes:
+      db-vote:
+
+    networks:
+      frontend:
+      backend:
+    ```
+
+#### **Action 3 : Valider le déploiement local**
+
+Avant de passer à Jenkins, assurez-vous que tout fonctionne comme prévu.
+
+1.  Ouvrez un terminal à la racine de votre projet `voting-app/`.
+2.  Exécutez la commande : `docker compose up --build -d`.
+3.  Vérifiez que les conteneurs sont bien lancés avec `docker ps`.
+4.  Ouvrez votre navigateur :
+      * L'application de vote doit être accessible à `http://localhost:5000`.
+      * Les résultats doivent être visibles à `http://localhost:5001`.
+5.  Une fois la vérification terminée, arrêtez et supprimez les conteneurs : `docker compose down -v`.
+
+[cite\_start]Votre environnement est maintenant parfaitement configuré et respecte les 4 premières tâches du projet[cite: 43, 46, 49, 52].
+
+-----
+
+### Étape 2 : Déploiement via Jenkins (Tâche 5)
+
+Nous allons maintenant créer un environnement Jenkins pour automatiser le déploiement de votre application.
+
+#### **Action 1 : Créer un `docker-compose.yml` pour Jenkins**
+
+[cite\_start]Comme demandé[cite: 56], nous allons utiliser Docker Compose pour lancer Jenkins. Créez un **nouveau dossier** à l'extérieur de `voting-app` (par exemple, `jenkins-setup`) et placez-y le fichier suivant.
+
+**`jenkins-setup/docker-compose.yml` :**
+
+```yaml
+version: '3.8'
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins_controller
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      # Permet à Jenkins de communiquer avec le Docker de l'hôte
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Empêche l'assistant de configuration initial, utile pour la configuration "as code"
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+
+volumes:
+  jenkins-data:
+```
+
+**Explication :** Le montage du volume `- /var/run/docker.sock:/var/run/docker.sock` est crucial. Il permet au conteneur Jenkins d'exécuter des commandes `docker` et `docker compose` sur la machine hôte.
+
+#### **Action 2 : Lancer Jenkins et le configurer**
+
+1.  Depuis le dossier `jenkins-setup/`, lancez Jenkins : `docker compose up -d`.
+2.  Accédez à Jenkins à l'adresse `http://localhost:8080`.
+3.  Installez les plugins suggérés.
+4.  Créez votre premier utilisateur administrateur.
+
+#### **Action 3 : Créer le `Jenkinsfile`**
+
+[cite\_start]C'est le cœur de votre pipeline d'automatisation[cite: 57]. Placez ce fichier à la racine de votre projet `voting-app/`.
+
+**`voting-app/Jenkinsfile` :**
+
+```groovy
+pipeline {
+    agent any
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Remplacez par l'URL de votre dépôt Git
+                git url: 'https://github.com/votre-utilisateur/voting-app.git', branch: 'main'
+                echo 'Source code checked out successfully.'
+            }
+        }
+
+        stage('Build Docker Images') {
+            steps {
+                script {
+                    echo 'Building Docker images for all services...'
+                    sh 'docker compose build --no-cache'
+                }
+            }
+        }
+
+        stage('Deploy Application') {
+            steps {
+                script {
+                    echo 'Deploying the application stack...'
+                    sh 'docker compose up -d'
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    echo 'Verifying the status of deployed services...'
+                    sh 'docker compose ps'
+                    // Petite pause pour s'assurer que les apps sont prêtes
+                    sleep(time: 10, unit: 'SECONDS')
+                    echo 'Deployment verification complete.'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline finished. Cleaning up workspace.'
+            // Optionnel: vous pouvez ajouter des étapes de nettoyage ici
+        }
+    }
+}
+```
+
+#### **Action 4 : Créer et lancer le pipeline dans Jenkins**
+
+1.  Dans l'interface Jenkins, cliquez sur "New Item" (ou "Nouvel item").
+2.  Donnez un nom (ex: `voting-app-pipeline`), choisissez **"Pipeline"**, et cliquez sur OK.
+3.  Dans la configuration du pipeline, sous la section **"Pipeline"**, changez la **"Definition"** en **"Pipeline script from SCM"**.
+4.  Choisissez **"Git"** comme SCM.
+5.  Entrez l'URL de votre dépôt `voting-app`.
+6.  Assurez-vous que le **"Script Path"** est `Jenkinsfile`.
+7.  Sauvegardez, puis cliquez sur **"Build Now"** (ou "Lancer un build") pour démarrer votre pipeline.
+
+[cite\_start]Vous pourrez suivre chaque étape (`Checkout`, `Build`, `Deploy`, `Verify`) s'exécuter directement dans l'interface de Jenkins, automatisant ainsi entièrement le déploiement de votre application comme exigé[cite: 58].
+
+En suivant ces étapes, vous aurez rempli toutes les exigences principales du projet et disposerez de tous les livrables demandés : `docker-compose.yml`, `.env`, `Jenkinsfile` et une base solide pour votre documentation et votre vidéo de démonstration.
